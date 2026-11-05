@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using News_Portal_API.Data;
 using News_Portal_API.DTOs;
 using News_Portal_API.DTOs.News;
+using News_Portal_API.Entities;
 
 namespace News_Portal_API.Controllers;
 
@@ -16,45 +17,22 @@ public class NewsController : ControllerBase
     {
         _context = context;
     }
+
     [HttpGet("featured")]
     public async Task<IActionResult> GetFeaturedNews()
     {
         try
         {
-            var connection = _context.Database.GetDbConnection();
+            var article = await _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Include(a => a.Author)
+                .Include(a => a.ArticleStat)
+                .Where(a => a.IsFeatured == true)
+                .OrderByDescending(a => a.CreatedAt)
+                .FirstOrDefaultAsync();
 
-            await connection.OpenAsync();
-
-            using var command = connection.CreateCommand();
-
-            command.CommandText = @"
-            SELECT TOP 1
-                a.id,
-                a.title,
-                a.short_description,
-                a.image_url,
-                a.created_at,
-                a.read_time_minutes,
-                a.is_trending,
-                c.id AS category_id,
-                c.name AS category_name,
-                c.slug AS category_slug,
-                c.badge_color,
-                au.id AS author_id,
-                au.name AS author_name,
-                ISNULL(s.likes_count, 0) AS likes_count,
-                ISNULL(s.shares_count, 0) AS shares_count,
-                ISNULL(s.bookmarks_count, 0) AS bookmarks_count
-            FROM articles a
-            LEFT JOIN categories c ON a.category_id = c.id
-            LEFT JOIN authors au ON a.author_id = au.id
-            LEFT JOIN article_stats s ON a.id = s.article_id
-            WHERE a.is_featured = 1
-            ORDER BY a.created_at DESC";
-
-            using var reader = await command.ExecuteReaderAsync();
-
-            if (!await reader.ReadAsync())
+            if (article == null)
             {
                 return NotFound(new ApiResponse<ArticleDto>
                 {
@@ -63,61 +41,20 @@ public class NewsController : ControllerBase
                 });
             }
 
-            var article = new ArticleDto
-            {
-                Id = reader.GetInt32(reader.GetOrdinal("id")),
-                Title = reader.GetString(reader.GetOrdinal("title")),
-                ShortDescription = reader.GetString(reader.GetOrdinal("short_description")),
-                ImageUrl = reader.GetString(reader.GetOrdinal("image_url")),
-                CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
-                ReadTimeMinutes = reader.GetInt32(reader.GetOrdinal("read_time_minutes")),
-                IsTrending = reader.GetBoolean(reader.GetOrdinal("is_trending")),
-
-                Category = new CategoryDto
-                {
-                    Id = reader.GetInt32(reader.GetOrdinal("category_id")),
-                    Name = reader.GetString(reader.GetOrdinal("category_name")),
-                    Slug = reader.GetString(reader.GetOrdinal("category_slug")),
-                    BadgeColor = reader.GetString(reader.GetOrdinal("badge_color"))
-                },
-
-                Author = new AuthorDto
-                {
-                    Id = reader.GetInt32(reader.GetOrdinal("author_id")),
-                    Name = reader.GetString(reader.GetOrdinal("author_name"))
-                },
-
-                Stats = new ArticleStatsDto
-                {
-                    LikesCount = reader.GetInt32(reader.GetOrdinal("likes_count")),
-                    SharesCount = reader.GetInt32(reader.GetOrdinal("shares_count")),
-                    BookmarksCount = reader.GetInt32(reader.GetOrdinal("bookmarks_count"))
-                }
-            };
-
             return Ok(new ApiResponse<ArticleDto>
             {
                 Success = true,
                 Message = "OK",
-                Data = article
+                Data = MapArticle(article)
             });
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             return StatusCode(500, new ApiResponse<ArticleDto>
             {
                 Success = false,
                 Message = "An internal server error occurred"
             });
-        }
-        finally
-        {
-            var connection = _context.Database.GetDbConnection();
-
-            if (connection.State == System.Data.ConnectionState.Open)
-            {
-                await connection.CloseAsync();
-            }
         }
     }
 
@@ -126,30 +63,16 @@ public class NewsController : ControllerBase
     {
         try
         {
-            var connection = _context.Database.GetDbConnection();
-
-            await connection.OpenAsync();
-
-            using var command = connection.CreateCommand();
-
-            command.CommandText = @"
-            SELECT id, title
-            FROM articles
-            WHERE is_breaking = 1
-            ORDER BY created_at DESC";
-
-            using var reader = await command.ExecuteReaderAsync();
-
-            var articles = new List<BreakingNewsDto>();
-
-            while (await reader.ReadAsync())
-            {
-                articles.Add(new BreakingNewsDto
+            var articles = await _context.Articles
+                .AsNoTracking()
+                .Where(a => a.IsBreaking == true)
+                .OrderByDescending(a => a.CreatedAt)
+                .Select(a => new BreakingNewsDto
                 {
-                    Id = reader.GetInt32(reader.GetOrdinal("id")),
-                    Title = reader.GetString(reader.GetOrdinal("title"))
-                });
-            }
+                    Id = a.Id,
+                    Title = a.Title
+                })
+                .ToListAsync();
 
             return Ok(new ApiResponse<List<BreakingNewsDto>>
             {
@@ -158,7 +81,7 @@ public class NewsController : ControllerBase
                 Data = articles
             });
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             return StatusCode(500, new ApiResponse<List<BreakingNewsDto>>
             {
@@ -166,24 +89,16 @@ public class NewsController : ControllerBase
                 Message = "An internal server error occurred"
             });
         }
-        finally
-        {
-            var connection = _context.Database.GetDbConnection();
-
-            if (connection.State == System.Data.ConnectionState.Open)
-            {
-                await connection.CloseAsync();
-            }
-        }
     }
 
     [HttpGet("articles")]
     public async Task<IActionResult> GetArticles(
-    [FromQuery] string tab = "latest",
-    [FromQuery] int page = 1,
-    [FromQuery] int limit = 4)
+        [FromQuery] string tab = "latest",
+        [FromQuery] int page = 1,
+        [FromQuery] int limit = 4)
     {
-        if (!new[] { "latest", "think", "health" }.Contains(tab, StringComparer.OrdinalIgnoreCase))
+        if (!new[] { "latest", "think", "health" }
+            .Contains(tab, StringComparer.OrdinalIgnoreCase))
         {
             return BadRequest(new ApiResponse<List<ArticleDto>>
             {
@@ -203,10 +118,6 @@ public class NewsController : ControllerBase
 
         try
         {
-            var connection = _context.Database.GetDbConnection();
-
-            await connection.OpenAsync();
-
             var category = tab.ToLowerInvariant() switch
             {
                 "think" => "Think",
@@ -214,113 +125,35 @@ public class NewsController : ControllerBase
                 _ => null
             };
 
-            using var countCommand = connection.CreateCommand();
+            var query = _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Include(a => a.Author)
+                .Include(a => a.ArticleStat)
+                .AsQueryable();
 
-            countCommand.CommandText = @"
-            SELECT COUNT(*)
-            FROM articles a
-            LEFT JOIN categories c ON a.category_id = c.id
-            WHERE (@category IS NULL OR c.name = @category)";
+            if (category != null)
+            {
+                query = query.Where(a =>
+                    a.Category != null && a.Category.Name == category);
+            }
 
-            var countCategoryParameter = countCommand.CreateParameter();
-            countCategoryParameter.ParameterName = "@category";
-            countCategoryParameter.Value = category is null ? DBNull.Value : category;
-            countCommand.Parameters.Add(countCategoryParameter);
-
-            var totalItems = Convert.ToInt32(
-                await countCommand.ExecuteScalarAsync()
-            );
+            var totalItems = await query.CountAsync();
 
             var totalPages = (int)Math.Ceiling((double)totalItems / limit);
 
-            using var command = connection.CreateCommand();
-
-            command.CommandText = @"
-            SELECT
-                a.id,
-                a.title,
-                a.short_description,
-                a.image_url,
-                a.created_at,
-                a.read_time_minutes,
-                c.id AS category_id,
-                c.name AS category_name,
-                c.slug AS category_slug,
-                c.badge_color,
-                au.id AS author_id,
-                au.name AS author_name,
-                ISNULL(s.likes_count, 0) AS likes_count,
-                ISNULL(s.shares_count, 0) AS shares_count,
-                ISNULL(s.bookmarks_count, 0) AS bookmarks_count
-            FROM articles a
-            LEFT JOIN categories c ON a.category_id = c.id
-            LEFT JOIN authors au ON a.author_id = au.id
-            LEFT JOIN article_stats s ON a.id = s.article_id
-            WHERE (@category IS NULL OR c.name = @category)
-            ORDER BY a.created_at DESC, a.id DESC
-            OFFSET @offset ROWS
-            FETCH NEXT @limit ROWS ONLY";
-
-            var categoryParameter = command.CreateParameter();
-            categoryParameter.ParameterName = "@category";
-            categoryParameter.Value = category is null ? DBNull.Value : category;
-            command.Parameters.Add(categoryParameter);
-
-            var offsetParameter = command.CreateParameter();
-            offsetParameter.ParameterName = "@offset";
-            offsetParameter.Value = (page - 1) * limit;
-            command.Parameters.Add(offsetParameter);
-
-            var limitParameter = command.CreateParameter();
-            limitParameter.ParameterName = "@limit";
-            limitParameter.Value = limit;
-            command.Parameters.Add(limitParameter);
-
-            using var reader = await command.ExecuteReaderAsync();
-
-            var articles = new List<ArticleDto>();
-
-            while (await reader.ReadAsync())
-            {
-                articles.Add(new ArticleDto
-                {
-                    Id = reader.GetInt32(reader.GetOrdinal("id")),
-                    Title = reader.GetString(reader.GetOrdinal("title")),
-                    ShortDescription = reader.GetString(reader.GetOrdinal("short_description")),
-                    ImageUrl = reader.GetString(reader.GetOrdinal("image_url")),
-                    CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
-                    ReadTimeMinutes = reader.GetInt32(reader.GetOrdinal("read_time_minutes")),
-
-                    Category = new CategoryDto
-                    {
-                        Id = reader.GetInt32(reader.GetOrdinal("category_id")),
-                        Name = reader.GetString(reader.GetOrdinal("category_name")),
-                        Slug = reader.GetString(reader.GetOrdinal("category_slug")),
-                        BadgeColor = reader.IsDBNull(reader.GetOrdinal("badge_color"))
-                            ? null
-                            : reader.GetString(reader.GetOrdinal("badge_color"))
-                    },
-
-                    Author = new AuthorDto
-                    {
-                        Id = reader.GetInt32(reader.GetOrdinal("author_id")),
-                        Name = reader.GetString(reader.GetOrdinal("author_name"))
-                    },
-
-                    Stats = new ArticleStatsDto
-                    {
-                        LikesCount = reader.GetInt32(reader.GetOrdinal("likes_count")),
-                        SharesCount = reader.GetInt32(reader.GetOrdinal("shares_count")),
-                        BookmarksCount = reader.GetInt32(reader.GetOrdinal("bookmarks_count"))
-                    }
-                });
-            }
+            var articles = await query
+                .OrderByDescending(a => a.CreatedAt)
+                .ThenByDescending(a => a.Id)
+                .Skip((page - 1) * limit)
+                .Take(limit)
+                .ToListAsync();
 
             return Ok(new ApiResponse<List<ArticleDto>>
             {
                 Success = true,
                 Message = "OK",
-                Data = articles,
+                Data = articles.Select(MapArticle).ToList(),
                 Pagination = new Pagination
                 {
                     CurrentPage = page,
@@ -338,15 +171,6 @@ public class NewsController : ControllerBase
                 Message = "An internal server error occurred"
             });
         }
-        finally
-        {
-            var connection = _context.Database.GetDbConnection();
-
-            if (connection.State == System.Data.ConnectionState.Open)
-            {
-                await connection.CloseAsync();
-            }
-        }
     }
 
     [HttpGet("live")]
@@ -354,26 +178,14 @@ public class NewsController : ControllerBase
     {
         try
         {
-            var connection = _context.Database.GetDbConnection();
+            var article = await _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Where(a => a.IsLive == true)
+                .OrderByDescending(a => a.CreatedAt)
+                .FirstOrDefaultAsync();
 
-            await connection.OpenAsync();
-
-            using var command = connection.CreateCommand();
-
-            command.CommandText = @"
-            SELECT TOP 1
-                a.id,
-                a.title,
-                a.image_url,
-                c.name AS category_name
-            FROM articles a
-            LEFT JOIN categories c ON a.category_id = c.id
-            WHERE a.is_live = 1
-            ORDER BY a.created_at DESC";
-
-            using var reader = await command.ExecuteReaderAsync();
-
-            if (!await reader.ReadAsync())
+            if (article == null)
             {
                 return NotFound(new ApiResponse<LiveNewsDto>
                 {
@@ -384,13 +196,12 @@ public class NewsController : ControllerBase
 
             var liveNews = new LiveNewsDto
             {
-                Id = reader.GetInt32(reader.GetOrdinal("id")),
-                Title = reader.GetString(reader.GetOrdinal("title")),
-                ImageUrl = reader.GetString(reader.GetOrdinal("image_url")),
-
+                Id = article.Id,
+                Title = article.Title,
+                ImageUrl = article.ImageUrl,
                 Category = new LiveCategoryDto
                 {
-                    Name = reader.GetString(reader.GetOrdinal("category_name"))
+                    Name = article.Category?.Name ?? string.Empty
                 }
             };
 
@@ -409,15 +220,6 @@ public class NewsController : ControllerBase
                 Message = "An internal server error occurred"
             });
         }
-        finally
-        {
-            var connection = _context.Database.GetDbConnection();
-
-            if (connection.State == System.Data.ConnectionState.Open)
-            {
-                await connection.CloseAsync();
-            }
-        }
     }
 
     [HttpGet("editors-picks")]
@@ -425,58 +227,34 @@ public class NewsController : ControllerBase
     {
         try
         {
-            var connection = _context.Database.GetDbConnection();
+            var articles = await _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Include(a => a.ArticleStat)
+                .Where(a => a.IsEditorsPick == true)
+                .OrderByDescending(a => a.CreatedAt)
+                .ToListAsync();
 
-            await connection.OpenAsync();
-
-            using var command = connection.CreateCommand();
-
-            command.CommandText = @"
-            SELECT
-                a.id,
-                a.title,
-                a.image_url,
-                c.id AS category_id,
-                c.name AS category_name,
-                c.badge_color,
-                ISNULL(s.likes_count, 0) AS likes_count,
-                ISNULL(s.shares_count, 0) AS shares_count,
-                ISNULL(s.bookmarks_count, 0) AS bookmarks_count
-            FROM articles a
-            LEFT JOIN categories c ON a.category_id = c.id
-            LEFT JOIN article_stats s ON a.id = s.article_id
-            WHERE a.is_editors_pick = 1
-            ORDER BY a.created_at DESC";
-
-            using var reader = await command.ExecuteReaderAsync();
-
-            var editorsPicks = new List<EditorsPickDto>();
-
-            while (await reader.ReadAsync())
+            var editorsPicks = articles.Select(a => new EditorsPickDto
             {
-                editorsPicks.Add(new EditorsPickDto
+                Id = a.Id,
+                Title = a.Title,
+                ImageUrl = a.ImageUrl,
+
+                Category = new EditorsPickCategoryDto
                 {
-                    Id = reader.GetInt32(reader.GetOrdinal("id")),
-                    Title = reader.GetString(reader.GetOrdinal("title")),
-                    ImageUrl = reader.GetString(reader.GetOrdinal("image_url")),
+                    Id = a.Category?.Id ?? 0,
+                    Name = a.Category?.Name ?? string.Empty,
+                    BadgeColor = a.Category?.BadgeColor
+                },
 
-                    Category = new EditorsPickCategoryDto
-                    {
-                        Id = reader.GetInt32(reader.GetOrdinal("category_id")),
-                        Name = reader.GetString(reader.GetOrdinal("category_name")),
-                        BadgeColor = reader.IsDBNull(reader.GetOrdinal("badge_color"))
-                            ? null
-                            : reader.GetString(reader.GetOrdinal("badge_color"))
-                    },
-
-                    Stats = new ArticleStatsDto
-                    {
-                        LikesCount = reader.GetInt32(reader.GetOrdinal("likes_count")),
-                        SharesCount = reader.GetInt32(reader.GetOrdinal("shares_count")),
-                        BookmarksCount = reader.GetInt32(reader.GetOrdinal("bookmarks_count"))
-                    }
-                });
-            }
+                Stats = new ArticleStatsDto
+                {
+                    LikesCount = a.ArticleStat?.LikesCount ?? 0,
+                    SharesCount = a.ArticleStat?.SharesCount ?? 0,
+                    BookmarksCount = a.ArticleStat?.BookmarksCount ?? 0
+                }
+            }).ToList();
 
             return Ok(new ApiResponse<List<EditorsPickDto>>
             {
@@ -493,16 +271,226 @@ public class NewsController : ControllerBase
                 Message = "An internal server error occurred"
             });
         }
-        finally
-        {
-            var connection = _context.Database.GetDbConnection();
+    }
 
-            if (connection.State == System.Data.ConnectionState.Open)
+    [HttpGet("{id}/related")]
+    public async Task<IActionResult> GetRelatedNews(
+        string id,
+        [FromQuery] int limit = 5)
+    {
+        if (!int.TryParse(id, out int newsId))
+        {
+            return BadRequest(new ApiResponse<List<RelatedNewsDto>>
             {
-                await connection.CloseAsync();
+                Success = false,
+                Message = "Invalid news ID. ID must be a number."
+            });
+        }
+
+        if (limit < 1)
+        {
+            return BadRequest(new ApiResponse<List<RelatedNewsDto>>
+            {
+                Success = false,
+                Message = "Limit must be greater than zero."
+            });
+        }
+
+        try
+        {
+            var article = await _context.Articles
+                .AsNoTracking()
+                .Where(a => a.Id == newsId)
+                .Select(a => new { a.CategoryId })
+                .FirstOrDefaultAsync();
+
+            if (article == null)
+            {
+                return NotFound(new ApiResponse<List<RelatedNewsDto>>
+                {
+                    Success = false,
+                    Message = "News not found."
+                });
             }
+
+            if (article.CategoryId == null)
+            {
+                return Ok(new ApiResponse<List<RelatedNewsDto>>
+                {
+                    Success = true,
+                    Message = "OK",
+                    Data = new List<RelatedNewsDto>()
+                });
+            }
+
+            var relatedArticles = await _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Include(a => a.ArticleStat)
+                .Where(a =>
+                    a.CategoryId == article.CategoryId &&
+                    a.Id != newsId)
+                .OrderByDescending(a => a.CreatedAt)
+                .Take(limit)
+                .ToListAsync();
+
+            var relatedNews = relatedArticles.Select(a => new RelatedNewsDto
+            {
+                Id = a.Id,
+                Title = a.Title,
+                ShortDescription = a.ShortDescription,
+                ImageUrl = a.ImageUrl,
+
+                Category = new RelatedNewsCategoryDto
+                {
+                    Id = a.Category?.Id ?? 0,
+                    Name = a.Category?.Name ?? string.Empty,
+                    BadgeColor = a.Category?.BadgeColor
+                },
+
+                Stats = new RelatedNewsStatsDto
+                {
+                    LikesCount = a.ArticleStat?.LikesCount ?? 0,
+                    SharesCount = a.ArticleStat?.SharesCount ?? 0,
+                    BookmarksCount = a.ArticleStat?.BookmarksCount ?? 0
+                }
+            }).ToList();
+
+            return Ok(new ApiResponse<List<RelatedNewsDto>>
+            {
+                Success = true,
+                Message = "OK",
+                Data = relatedNews
+            });
+        }
+        catch (Exception)
+        {
+            return StatusCode(500, new ApiResponse<List<RelatedNewsDto>>
+            {
+                Success = false,
+                Message = "An internal server error occurred."
+            });
         }
     }
 
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetNewsDetail(string id)
+    {
+        if (!int.TryParse(id, out int newsId))
+        {
+            return BadRequest(new ApiResponse<NewsDetailDto>
+            {
+                Success = false,
+                Message = "Invalid news ID. ID must be a number."
+            });
+        }
 
+        try
+        {
+            var article = await _context.Articles
+                .AsNoTracking()
+                .Include(a => a.Category)
+                .Include(a => a.Author)
+                .Include(a => a.ArticleStat)
+                .FirstOrDefaultAsync(a => a.Id == newsId);
+
+            if (article == null)
+            {
+                return NotFound(new ApiResponse<NewsDetailDto>
+                {
+                    Success = false,
+                    Message = "News not found."
+                });
+            }
+
+            var news = new NewsDetailDto
+            {
+                Id = article.Id,
+                Title = article.Title,
+                ShortDescription = article.ShortDescription,
+                Content = article.Content,
+                ImageUrl = article.ImageUrl,
+                CreatedAt = article.CreatedAt,
+                ReadTimeMinutes = article.ReadTimeMinutes,
+                IsTrending = article.IsTrending ?? false,
+                IsBreaking = article.IsBreaking ?? false,
+                IsLive = article.IsLive ?? false,
+
+                Category = article.Category == null ? null! : new NewsDetailCategoryDto
+                {
+                    Id = article.Category.Id,
+                    Name = article.Category.Name,
+                    Slug = article.Category.Slug,
+                    BadgeColor = article.Category.BadgeColor
+                },
+
+                Author = article.Author == null ? null! : new NewsDetailAuthorDto
+                {
+                    Id = article.Author.Id,
+                    Name = article.Author.Name,
+                    AvatarUrl = article.Author.AvatarUrl,
+                    Bio = article.Author.Bio,
+                    TwitterHandle = article.Author.TwitterHandle
+                },
+
+                Stats = new NewsDetailStatsDto
+                {
+                    LikesCount = article.ArticleStat?.LikesCount ?? 0,
+                    SharesCount = article.ArticleStat?.SharesCount ?? 0,
+                    BookmarksCount = article.ArticleStat?.BookmarksCount ?? 0,
+                    CommentsCount = article.ArticleStat?.CommentsCount ?? 0
+                }
+            };
+
+            return Ok(new ApiResponse<NewsDetailDto>
+            {
+                Success = true,
+                Message = "OK",
+                Data = news
+            });
+        }
+        catch (Exception)
+        {
+            return StatusCode(500, new ApiResponse<NewsDetailDto>
+            {
+                Success = false,
+                Message = "An internal server error occurred."
+            });
+        }
+    }
+
+    private static ArticleDto MapArticle(Article article)
+    {
+        return new ArticleDto
+        {
+            Id = article.Id,
+            Title = article.Title,
+            ShortDescription = article.ShortDescription,
+            ImageUrl = article.ImageUrl,
+            CreatedAt = article.CreatedAt,
+            ReadTimeMinutes = article.ReadTimeMinutes,
+            IsTrending = article.IsTrending ?? false,
+
+            Category = article.Category == null ? null! : new CategoryDto
+            {
+                Id = article.Category.Id,
+                Name = article.Category.Name,
+                Slug = article.Category.Slug,
+                BadgeColor = article.Category.BadgeColor
+            },
+
+            Author = article.Author == null ? null! : new AuthorDto
+            {
+                Id = article.Author.Id,
+                Name = article.Author.Name
+            },
+
+            Stats = new ArticleStatsDto
+            {
+                LikesCount = article.ArticleStat?.LikesCount ?? 0,
+                SharesCount = article.ArticleStat?.SharesCount ?? 0,
+                BookmarksCount = article.ArticleStat?.BookmarksCount ?? 0
+            }
+        };
+    }
 }
